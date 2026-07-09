@@ -442,6 +442,7 @@ pub fn spawn(
             Some(tempfile) => tempfile.path().display().to_string(),
             None => mount.host.display().to_string(),
         };
+        validate_mount_host_type(mount, seeded.is_some())?;
         docker_args.extend(mount_bind_args(&host_arg, mount, seeded.is_some())?);
 
         if let Some(tempfile) = seeded {
@@ -765,6 +766,53 @@ fn sanitize_label_value(value: &str) -> String {
     value.replace([',', '\n', '\r'], "_")
 }
 
+/// Reject bind mounts where the container target is a file path but the host
+/// source is a directory. Docker fails these at container init with an opaque
+/// "not a directory" error; this usually means Docker previously created an
+/// empty host directory when a missing file was bind-mounted.
+/// True when a path basename looks like a file (has an extension), not a
+/// directory. Hidden names like `.claude` (leading dot only) are treated as
+/// directories; `.claude.json` / `.credentials.json` look like files.
+fn basename_looks_like_file(name: &std::ffi::OsStr) -> bool {
+    let s = name.to_string_lossy();
+    match s.rfind('.') {
+        // Only a leading dot (e.g. `.claude`, `.codex`) → directory-like.
+        Some(0) => false,
+        Some(_) => true,
+        None => false,
+    }
+}
+
+fn validate_mount_host_type(mount: &crate::config::ContainerMount, seeded: bool) -> Result<()> {
+    if seeded {
+        return Ok(());
+    }
+    let Some(file_name) = mount.container.file_name() else {
+        return Ok(());
+    };
+    if file_name.is_empty() || file_name == std::ffi::OsStr::new("/") {
+        return Ok(());
+    }
+    // Directory→directory mounts (e.g. `~/.claude` → `/home/coder/.claude`) are
+    // valid. Only reject when the container path looks like a *file* but the
+    // host path is a directory — the classic Docker trap of creating an empty
+    // dir when a missing file was bind-mounted.
+    if !basename_looks_like_file(file_name) || !mount.host.is_dir() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "refusing to mount {} onto container file {}: the host path is a directory, not a file. \
+         This often happens after Docker created an empty directory when a missing file was \
+         bind-mounted. Remove the directory and recreate the file (for Claude config: \
+         `rm -rf ~/.claude.json ~/.claude/.claude.json ~/.claude/.credentials.json && \
+         mkdir -p ~/.claude && printf '{{}}\\n' > ~/.claude.json && \
+         cp ~/.claude.json ~/.claude/.claude.json && \
+         printf '{{}}\\n' > ~/.claude/.credentials.json`).",
+        mount.host.display(),
+        mount.container.display()
+    );
+}
+
 /// Append `flag value` to `docker_args` when `value` is present and non-blank.
 /// Used for optional `docker run` flags like `--memory`, `--cpus`, `--shm-size`.
 fn push_opt_flag(docker_args: &mut Vec<String>, flag: &str, value: Option<&str>) {
@@ -901,8 +949,17 @@ fn seed_private_mount(
     } else if mount.host.is_file() {
         std::fs::read(&mount.host)
             .with_context(|| format!("reading {} to seed container copy", mount.host.display()))?
+    } else if mount.host.is_dir() && (is_claude_config || force_empty_credentials) {
+        b"{}".to_vec()
     } else if is_claude_config && claude_oauth_token_available {
         b"{}".to_vec()
+    } else if mount.host.is_dir() && mount.is_seeded() {
+        anyhow::bail!(
+            "cannot seed container file {} from host directory {}. Remove the directory and \
+             recreate the expected file, or delete the empty directory Docker created.",
+            mount.container.display(),
+            mount.host.display()
+        );
     } else {
         return Ok(None);
     };
@@ -1531,6 +1588,52 @@ mod tests {
                 .expect("mount args")
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn basename_looks_like_file_distinguishes_dirs_from_files() {
+        use std::ffi::OsStr;
+        // Hidden dirs (leading dot only) and plain names → not files.
+        assert!(!super::basename_looks_like_file(OsStr::new(".claude")));
+        assert!(!super::basename_looks_like_file(OsStr::new(".codex")));
+        assert!(!super::basename_looks_like_file(OsStr::new("vim")));
+        assert!(!super::basename_looks_like_file(OsStr::new(".gitconfig")));
+        // Names with a real extension → files.
+        assert!(super::basename_looks_like_file(OsStr::new(".claude.json")));
+        assert!(super::basename_looks_like_file(OsStr::new(
+            ".credentials.json"
+        )));
+        assert!(super::basename_looks_like_file(OsStr::new("foo.toml")));
+    }
+
+    #[test]
+    fn validate_mount_host_type_allows_directory_mounts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let host_dir = dir.path().join(".claude");
+        std::fs::create_dir(&host_dir).expect("mkdir");
+        let m = mount(
+            host_dir.to_str().unwrap(),
+            "/home/coder/.claude",
+            None,
+        );
+        super::validate_mount_host_type(&m, false).expect("dir→dir mount ok");
+    }
+
+    #[test]
+    fn validate_mount_host_type_rejects_dir_where_file_expected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let host_dir = dir.path().join(".claude.json");
+        std::fs::create_dir(&host_dir).expect("mkdir trap");
+        let m = mount(
+            host_dir.to_str().unwrap(),
+            "/home/coder/.claude.json",
+            Some(false),
+        );
+        let err = super::validate_mount_host_type(&m, false).expect_err("dir as file");
+        assert!(
+            err.to_string().contains("host path is a directory"),
+            "unexpected error: {err}"
         );
     }
 }

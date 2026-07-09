@@ -763,6 +763,16 @@ fn shared_session_mount(host: &str, container: &str) -> Result<Option<ContainerM
     if !host.exists() {
         return Ok(None);
     }
+    // Docker creates empty directories when a missing host *file* is bind-mounted.
+    // Skip those paths so configured seed mounts can supply a private copy instead
+    // of failing the whole `docker run` with "not a directory".
+    if host.is_dir()
+        && Path::new(container)
+            .file_name()
+            .is_some_and(|name| name == ".claude.json" || name == ".credentials.json")
+    {
+        return Ok(None);
+    }
     Ok(Some(ContainerMount {
         host: host.clone(),
         container: PathBuf::from(container),
