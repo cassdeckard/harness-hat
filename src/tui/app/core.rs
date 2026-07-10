@@ -467,7 +467,7 @@ impl App {
         }
     }
 
-    fn remove_empty_session_groups(&mut self) {
+    pub(crate) fn remove_empty_session_groups(&mut self) {
         self.session_groups
             .retain(|group| !group.terminal_indices.is_empty());
     }
@@ -1224,6 +1224,13 @@ impl App {
         self.container_usage
             .get(&docker_name)
             .and_then(|cached| cached.stats.clone())
+    }
+
+    /// Surface a launch or config error in the log pane and open it fullscreen so
+    /// failures are visible even when `show_log_pane = false`.
+    pub(crate) fn push_user_error(&mut self, text: impl Into<String>) {
+        self.push_log(text, true);
+        self.open_log_fullscreen();
     }
 
     pub(crate) fn push_log(&mut self, text: impl Into<String>, is_error: bool) {

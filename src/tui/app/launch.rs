@@ -1,6 +1,7 @@
 use super::*;
 use crate::server::{LaunchEvent, WorkspaceLaunchItem, WorkspaceLaunchResponse};
 use tokio::sync::mpsc as tokio_mpsc;
+use tracing::warn;
 
 impl App {
     fn container_command_for_profile(ctr: &crate::config::ContainerDef) -> Option<Vec<String>> {
@@ -31,15 +32,6 @@ impl App {
             );
             cfg.containers.clone()
         })
-    }
-
-    pub(crate) fn workspace_template_for_workspace(
-        &mut self,
-        workspace_idx: usize,
-        template_idx: usize,
-    ) -> Option<crate::config::ContainerDef> {
-        let templates = self.workspace_templates_for_workspace(workspace_idx);
-        templates.get(template_idx).cloned()
     }
 
     pub(crate) fn configured_template_idx(&self, template_idx: usize) -> Option<usize> {
@@ -301,15 +293,91 @@ impl App {
         session_group: Option<usize>,
         launch_cwd: Option<PathBuf>,
     ) {
-        let Some(ctr) = self.workspace_template_for_workspace(pi, ctr_idx) else {
-            return;
-        };
+        self.do_launch_container_on_workspace_with_template_and_env(
+            pi,
+            ctr_idx,
+            None,
+            proxy_priority,
+            extra_env,
+            session_group,
+            launch_cwd,
+        );
+    }
 
+    pub(crate) fn do_launch_container_on_workspace_with_template_and_env(
+        &mut self,
+        pi: usize,
+        ctr_idx: usize,
+        template_name: Option<&str>,
+        proxy_priority: crate::proxy::SourcePriority,
+        extra_env: &[(String, String)],
+        session_group: Option<usize>,
+        launch_cwd: Option<PathBuf>,
+    ) {
         let cfg = self.config.get();
+        let workspace_label = cfg
+            .workspaces
+            .get(pi)
+            .map(|ws| ws.name.as_str())
+            .unwrap_or("(unknown workspace)");
+
+        let templates = self.workspace_templates_for_workspace(pi);
+        let (resolved_idx, ctr) = if let Some(name) = template_name {
+            match templates
+                .iter()
+                .enumerate()
+                .find(|(_, template)| template.name == name)
+            {
+                Some((idx, template)) => (idx, template.clone()),
+                None => {
+                    let available = templates
+                        .iter()
+                        .map(|template| template.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let message = format!(
+                        "launch failed: no template named '{name}' for workspace '{workspace_label}' \
+                         (available: {available})"
+                    );
+                    warn!("{message}");
+                    self.push_user_error(message);
+                    return;
+                }
+            }
+        } else {
+            match templates.get(ctr_idx).cloned() {
+                Some(template) => (ctr_idx, template),
+                None => {
+                    let available = templates
+                        .iter()
+                        .map(|template| template.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let message = format!(
+                        "launch failed: template index {ctr_idx} is out of range for workspace \
+                         '{workspace_label}' ({}/{} templates: {available})",
+                        ctr_idx.saturating_add(1),
+                        templates.len()
+                    );
+                    warn!("{message}");
+                    self.push_user_error(message);
+                    return;
+                }
+            }
+        };
+        let ctr_idx = resolved_idx;
 
         let proj = match cfg.workspaces.get(pi) {
             Some(p) => p.clone(),
-            None => return,
+            None => {
+                let message = format!(
+                    "launch failed: workspace index {pi} is invalid (only {} configured)",
+                    cfg.workspaces.len()
+                );
+                warn!("{message}");
+                self.push_user_error(message);
+                return;
+            }
         };
 
         if !self.preflight_image_or_prompt_build(
@@ -345,10 +413,10 @@ impl App {
         ) {
             Ok(listener) => listener,
             Err(e) => {
-                self.push_log(
-                    format!("cannot launch '{}' on '{}': {e}", ctr.name, proj.name),
-                    true,
-                );
+                self.push_user_error(format!(
+                    "cannot launch '{}' on '{}': {e}",
+                    ctr.name, proj.name
+                ));
                 return;
             }
         };
@@ -436,10 +504,14 @@ impl App {
                 self.preview_session = Some(new_si);
             }
             Err(e) => {
-                self.push_log(
-                    format!("launch '{}' on '{}' failed: {e}", ctr.name, proj.name),
-                    true,
-                );
+                self.push_user_error(format!(
+                    "launch '{}' on '{}' failed: {e}",
+                    ctr.name, proj.name
+                ));
+                // `resolve_or_create_session_group` runs before spawn; drop the
+                // placeholder group when launch fails so the sidebar doesn't
+                // show a dead session row whose Enter handler has no terminal.
+                self.remove_empty_session_groups();
             }
         }
     }

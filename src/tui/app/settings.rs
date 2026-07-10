@@ -267,6 +267,16 @@ impl App {
         }
     }
 
+    pub(crate) fn open_picker_for_workspace(&mut self, pi: usize) {
+        if !self.open_template_picker_for_workspace(pi) {
+            return;
+        }
+        self.focus = Focus::ContainerPicker;
+        self.active_activity = None;
+        self.active_network_session = None;
+        self.active_settings_workspace = None;
+    }
+
     pub(crate) fn open_picker(&mut self) {
         let cfg = self.config.get();
         let items = self.sidebar_items();
@@ -281,6 +291,10 @@ impl App {
                 }
                 self.container_picker =
                     Some(ContainerPickerState::NewSessionWorkspace { cursor: 0 });
+                self.focus = Focus::ContainerPicker;
+                self.active_activity = None;
+                self.active_network_session = None;
+                self.active_settings_workspace = None;
             }
             SidebarItem::Launch(pi) => {
                 if pi >= cfg.workspaces.len() {
@@ -289,11 +303,13 @@ impl App {
                 if !self.open_template_picker_for_workspace(pi) {
                     return;
                 }
+                self.focus = Focus::ContainerPicker;
+                self.active_activity = None;
+                self.active_network_session = None;
+                self.active_settings_workspace = None;
             }
             _ => return,
         }
-
-        self.focus = Focus::ContainerPicker;
     }
 
     fn open_template_picker_for_workspace(&mut self, workspace_idx: usize) -> bool {
@@ -372,11 +388,33 @@ impl App {
         }
 
         if let (Some(workspace_idx), Some(ctr_idx)) = (launch_workspace_idx, launch_container_idx) {
+            let templates = self.workspace_templates_for_workspace(workspace_idx);
+            let Some(template_name) = templates.get(ctr_idx).map(|template| template.name.clone())
+            else {
+                let workspace_name = self
+                    .config
+                    .get()
+                    .workspaces
+                    .get(workspace_idx)
+                    .map(|ws| ws.name.clone())
+                    .unwrap_or_else(|| format!("workspace-{workspace_idx}"));
+                self.push_user_error(format!(
+                    "launch failed: template #{} is out of range for workspace '{}' \
+                     ({} templates available)",
+                    ctr_idx.saturating_add(1),
+                    workspace_name,
+                    templates.len()
+                ));
+                self.container_picker = None;
+                self.focus = Focus::Sidebar;
+                return;
+            };
             self.container_picker = None;
             self.focus = Focus::Sidebar;
-            self.do_launch_container_on_workspace_with_priority_and_env(
+            self.do_launch_container_on_workspace_with_template_and_env(
                 workspace_idx,
                 ctr_idx,
+                Some(template_name.as_str()),
                 crate::proxy::SourcePriority::Primary,
                 &[],
                 launch_session_group,

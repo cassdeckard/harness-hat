@@ -635,12 +635,20 @@ pub(crate) fn render_idle(frame: &mut Frame, area: Rect) {
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "  Select a workspace and press [↵] to launch a container.",
+            "  Select a workspace under ─ Workspaces ─ (▸ row) and press [↵].",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  Or press + New Session..., then pick workspace and template.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  If [↵] does nothing, press ^B — sidebar focus shows [↵]select in the status bar.",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "  Select a running container and press [↵] to attach.",
+            "  Select a running container (● row above) and press [↵] to attach.",
             Style::default().fg(Color::DarkGray),
         )),
     ];

@@ -99,6 +99,36 @@ impl App {
             return;
         }
 
+        // Workspace hotkeys ([H], [B], …) and idle Enter work without ^B first.
+        // When focus is Terminal the status bar shows [k]stop, not sidebar keys,
+        // but Enter/hotkeys were previously ignored — leaving the idle pane up.
+        if !self.has_pending_approval_modal()
+            && !matches!(
+                self.focus,
+                Focus::ContainerPicker
+                    | Focus::Settings
+                    | Focus::ImageBuild
+                    | Focus::NewWorkspace
+            )
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            if key.code == KeyCode::Enter
+                && self.focus == Focus::Terminal
+                && self.active_session.is_none()
+            {
+                self.focus = Focus::Sidebar;
+                self.handle_sidebar_enter(&self.sidebar_items());
+                return;
+            }
+            if let KeyCode::Char(ch) = key.code
+                && self.focus_workspace_hotkey(ch.to_ascii_lowercase())
+            {
+                return;
+            }
+        }
+
         if self.log_fullscreen {
             match key.code {
                 KeyCode::Char('o') | KeyCode::Esc | KeyCode::Char('q') => {
@@ -190,6 +220,21 @@ impl App {
         self.last_terminal_esc = None;
     }
 
+    pub(crate) fn focus_workspace_hotkey(&mut self, hotkey: char) -> bool {
+        let Some(idx) = self.sidebar_workspace_hotkey_target(hotkey) else {
+            return false;
+        };
+        let items = self.sidebar_items();
+        self.sidebar_idx = idx;
+        self.focus = Focus::Sidebar;
+        self.active_activity = None;
+        self.active_network_session = None;
+        self.active_settings_workspace = None;
+        self.update_sidebar_preview(&items);
+        self.ensure_sidebar_visible(&items, 10);
+        true
+    }
+
     pub(crate) fn handle_sidebar_key(&mut self, key: KeyEvent) {
         let items = self.sidebar_items();
 
@@ -197,11 +242,8 @@ impl App {
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
             && let KeyCode::Char(ch) = key.code
-            && let Some(idx) = self.sidebar_workspace_hotkey_target(ch.to_ascii_lowercase())
+            && self.focus_workspace_hotkey(ch.to_ascii_lowercase())
         {
-            self.sidebar_idx = idx;
-            self.update_sidebar_preview(&items);
-            self.ensure_sidebar_visible(&items, 10);
             return;
         }
         match key.code {
@@ -323,6 +365,20 @@ impl App {
                     self.active_activity = None;
                     self.active_network_session = None;
                     self.active_settings_workspace = None;
+                } else if let Some(pi) = self
+                    .session_groups
+                    .get(si)
+                    .and_then(|group| group.workspace_idx)
+                {
+                    // Stale/empty session group (e.g. launch failed): open the
+                    // template picker instead of silently doing nothing.
+                    self.open_picker_for_workspace(pi);
+                } else {
+                    self.push_log(
+                        "no running container for this session — pick the workspace under \
+                         ─ Workspaces ─ or press + New Session...",
+                        true,
+                    );
                 }
             }
             Some(SidebarItem::SessionTerminal(group_idx, session_pos)) => {
