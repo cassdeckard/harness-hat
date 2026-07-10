@@ -487,6 +487,12 @@ pub fn sanitize_docker_name(input: &str) -> String {
     }
 }
 
+/// Stable Docker `--name` for a workspace session (`hh-<workspace>`).
+#[instrument(level = "trace", skip(workspace_name))]
+pub fn workspace_docker_run_name(workspace_name: &str) -> String {
+    format!("hh-{}", sanitize_docker_name(workspace_name).to_ascii_lowercase())
+}
+
 pub(crate) fn mount_mode_arg(mode: &MountMode) -> &'static str {
     match mode {
         MountMode::Ro => "ro",
@@ -595,6 +601,20 @@ mod tests {
         assert_eq!(sanitize_docker_name("my project"), "my-project");
         assert_eq!(sanitize_docker_name("my@proj!ect"), "my-proj-ect");
         assert_eq!(sanitize_docker_name(""), "container");
+    }
+
+    #[test]
+    fn workspace_docker_run_name_uses_workspace_slug() {
+        use super::workspace_docker_run_name;
+        assert_eq!(
+            workspace_docker_run_name("branded-auction-models"),
+            "hh-branded-auction-models"
+        );
+        assert_eq!(
+            workspace_docker_run_name("Branded Auction Models"),
+            "hh-branded-auction-models"
+        );
+        assert_eq!(workspace_docker_run_name(""), "hh-container");
     }
 
     #[test]

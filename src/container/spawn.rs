@@ -19,7 +19,7 @@ use crate::config::{ContainerDef, MountMode, container_path_file_name, container
 use crate::container::core::{
     LABEL_ALIAS, LABEL_SESSION, LABEL_SHELL, LABEL_TEMPLATE, LABEL_WORKSPACE, TERMINAL_SCROLLBACK_LINES,
     TermSize, docker_bind_mount_args, loopback_to_host_docker, parse_docker_label,
-    sanitize_docker_name, terminal_bottom_lines,
+    terminal_bottom_lines, workspace_docker_run_name,
 };
 use crate::container::helpers::detect_default_colors;
 use crate::container::{ContainerSession, SessionEventProxy, read_container_id};
@@ -69,11 +69,7 @@ pub fn spawn(
 
     let cidfile =
         std::env::temp_dir().join(format!("harness-hat-cid-{}.txt", uuid::Uuid::new_v4()));
-    let docker_run_name = format!(
-        "harness-hat-{}-{}",
-        sanitize_docker_name(&ctr.name),
-        uuid::Uuid::new_v4().simple()
-    );
+    let docker_run_name = allocate_docker_run_name(project_name)?;
     let alias = allocate_session_alias()?;
 
     let container_control_url = loopback_to_host_docker(control_url);
@@ -619,6 +615,64 @@ fn docker_pty_options(docker_args: Vec<String>) -> tty::Options {
     }
 
     options
+}
+
+/// Pick a stable Docker `--name` for the workspace, suffixing `-2`, `-3`, …
+/// when any container (running or stopped) already owns the base name.
+fn allocate_docker_run_name(workspace_name: &str) -> Result<String> {
+    let base = workspace_docker_run_name(workspace_name);
+    let used = used_docker_container_names()?;
+    Ok(pick_available_docker_run_name(&base, &used))
+}
+
+/// Given a base `hh-<workspace>` name and the set of names already taken in
+/// Docker, return the first free candidate (`base`, then `base-2`, …).
+fn pick_available_docker_run_name(
+    base: &str,
+    used: &std::collections::HashSet<String>,
+) -> String {
+    if !used.contains(base) {
+        return base.to_string();
+    }
+    for suffix in 2..=999 {
+        let candidate = format!("{base}-{suffix}");
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+    }
+    format!(
+        "{base}-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    )
+}
+
+/// List Docker container names for all containers. Docker rejects `docker run
+/// --name` when a stopped container still holds the name, so allocation must
+/// consider more than running containers.
+fn used_docker_container_names() -> Result<std::collections::HashSet<String>> {
+    let output = std::process::Command::new("docker")
+        .args(["ps", "-a", "--format", "{{.Names}}"])
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .context("running docker ps -a to enumerate container names")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!(
+            status = ?output.status.code(),
+            stderr = %stderr.trim(),
+            "docker ps -a failed while enumerating container names"
+        );
+        anyhow::bail!(
+            "docker ps -a exited with {:?}: {}",
+            output.status.code(),
+            stderr.trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// Pick a zero-padded 4-digit id not currently used by a running harness-hat
@@ -1634,6 +1688,27 @@ mod tests {
         assert!(
             err.to_string().contains("host path is a directory"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn pick_available_docker_run_name_returns_base_when_free() {
+        let used = std::collections::HashSet::from(["hh-other".to_string()]);
+        assert_eq!(
+            super::pick_available_docker_run_name("hh-harness-hat", &used),
+            "hh-harness-hat"
+        );
+    }
+
+    #[test]
+    fn pick_available_docker_run_name_suffixes_when_base_taken() {
+        let used = std::collections::HashSet::from([
+            "hh-harness-hat".to_string(),
+            "hh-harness-hat-2".to_string(),
+        ]);
+        assert_eq!(
+            super::pick_available_docker_run_name("hh-harness-hat", &used),
+            "hh-harness-hat-3"
         );
     }
 }
