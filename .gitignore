@@ -44,3 +44,4 @@ __pycache__/
 
 #Ignore cursor AI rules
 .cursor/rules/codacy.mdc
+.codacy
