@@ -40,3 +40,7 @@ __pycache__/
 
 # Runtime helper temp files created by older container launch code
 /docker/scripts/harness-hat-hostdo-*
+
+
+#Ignore cursor AI rules
+.cursor/rules/codacy.mdc
