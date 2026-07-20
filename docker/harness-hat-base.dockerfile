@@ -2,12 +2,18 @@
 # After modifying this file, rebuild with: ./docker/build.sh
 # (This also rebuilds all language images that extend it.)
 
+# Pin uv image tag here (global ARG — must precede the first FROM).
+ARG UV_VERSION=0.11.28
+
 FROM rust:1.88-slim-bookworm AS tun2proxy-build
 
 ENV GIT_HASH=crates-io
 
 ARG TUN2PROXY_VERSION=0.7.21
 RUN cargo install --locked --version "${TUN2PROXY_VERSION}" --bin tun2proxy-bin tun2proxy
+
+# BuildKit does not expand ARGs in COPY --from=; pin the image in a named stage.
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
 # harness-hat base — Ubuntu 24.04 LTS (Noble Numbat)
 #
@@ -67,7 +73,10 @@ RUN apt-get update -o APT::Update::Error-Mode=any && apt-get install -y --no-ins
       curl \
       gnupg \
       nano \
+      vim \
+      less \
       git \
+      bash-completion \
       python3 \
       python3-pip \
       python3-venv \
@@ -106,6 +115,12 @@ RUN set -eu; \
     chmod 0755 /usr/local/bin/sg /usr/local/bin/ast-grep; \
     rm -rf /tmp/sg.zip /tmp/sg-extract; \
     sg --version
+
+# uv / uvx — Python package runner used by MCP servers (e.g. mcp-atlassian via
+# `uvx mcp-atlassian@latest`) and general Python tooling in agent sessions.
+COPY --from=uv /uv /uvx /usr/local/bin/
+ENV UV_TOOL_BIN_DIR=/usr/local/bin
+RUN uv --version && uvx --version
 
 # Match Coder's conventional non-root user while keeping uid/gid 1000 for
 # host-mounted auth and workspace files.
