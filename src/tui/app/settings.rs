@@ -278,7 +278,6 @@ impl App {
     }
 
     pub(crate) fn open_picker(&mut self) {
-        let cfg = self.config.get();
         let items = self.sidebar_items();
         let Some(current) = items.get(self.sidebar_idx).cloned() else {
             return;
