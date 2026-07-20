@@ -132,13 +132,102 @@ pub fn inspect_container_usage(docker_name: &str) -> Result<Option<ContainerUsag
     }
 }
 
+/// Whether `image` (e.g. `harness-hat-dotnet:local`) is available to `docker run`.
+///
+/// Docker Desktop with the containerd image store (and Resource Saver after the
+/// last container exits) can briefly make `docker image inspect` return
+/// "No such image" even while `docker images` still lists the tag. Treat that
+/// as present when the images list still has it, retry transient daemon errors,
+/// and only report missing when both checks agree the tag is gone.
 pub(crate) fn docker_image_exists(image: &str) -> std::io::Result<bool> {
-    let status = std::process::Command::new("docker")
+    let mut last_transient: Option<String> = None;
+    for attempt in 0..3u32 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(150 * u64::from(attempt)));
+        }
+
+        match inspect_image_once(image)? {
+            ImageLookup::Present => return Ok(true),
+            ImageLookup::Missing => {
+                // Inspect said missing — confirm via the images index before
+                // forcing a rebuild prompt.
+                if image_listed_locally(image)? {
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+            ImageLookup::Transient(msg) => {
+                last_transient = Some(msg);
+            }
+        }
+    }
+
+    Err(std::io::Error::other(last_transient.unwrap_or_else(|| {
+        format!("failed to inspect docker image '{image}'")
+    })))
+}
+
+#[derive(Debug)]
+enum ImageLookup {
+    Present,
+    Missing,
+    Transient(String),
+}
+
+fn inspect_image_once(image: &str) -> std::io::Result<ImageLookup> {
+    let output = std::process::Command::new("docker")
         .args(["image", "inspect", image])
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()?;
-    Ok(status.success())
+        .stderr(std::process::Stdio::piped())
+        .output()?;
+
+    if output.status.success() {
+        return Ok(ImageLookup::Present);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr_indicates_missing_image(&stderr) {
+        Ok(ImageLookup::Missing)
+    } else {
+        let msg = stderr.trim();
+        Ok(ImageLookup::Transient(if msg.is_empty() {
+            format!(
+                "docker image inspect '{image}' exited with {:?}",
+                output.status.code()
+            )
+        } else {
+            msg.to_string()
+        }))
+    }
+}
+
+fn image_listed_locally(image: &str) -> std::io::Result<bool> {
+    let output = std::process::Command::new("docker")
+        .args(["images", "-q", image])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()?;
+
+    if output.status.success() {
+        return Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr_indicates_missing_image(&stderr) {
+        return Ok(false);
+    }
+
+    let msg = stderr.trim();
+    Err(std::io::Error::other(if msg.is_empty() {
+        format!("docker images -q '{image}' exited with {:?}", output.status.code())
+    } else {
+        msg.to_string()
+    }))
+}
+
+fn stderr_indicates_missing_image(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("no such image") || lower.contains("no such object")
 }
 
 pub(crate) fn detect_default_colors() -> ((u8, u8, u8), (u8, u8, u8)) {
@@ -191,4 +280,26 @@ pub(crate) fn blend_toward_bg(fg: (u8, u8, u8), bg: (u8, u8, u8), fg_weight: f32
 pub(crate) fn luma_u8((r, g, b): (u8, u8, u8)) -> u8 {
     let y = 0.2126 * (r as f32) + 0.7152 * (g as f32) + 0.0722 * (b as f32);
     y.round().clamp(0.0, 255.0) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stderr_indicates_missing_image;
+
+    #[test]
+    fn missing_image_stderr_variants() {
+        assert!(stderr_indicates_missing_image(
+            "Error response from daemon: No such image: harness-hat-dotnet:local"
+        ));
+        assert!(stderr_indicates_missing_image(
+            r#"{"message":"No such image: harness-hat-dotnet:local"}"#
+        ));
+        assert!(stderr_indicates_missing_image(
+            "Error: No such object: harness-hat-dotnet:local"
+        ));
+        assert!(!stderr_indicates_missing_image(
+            "failed to connect to the docker API at unix:///tmp/nope.sock"
+        ));
+        assert!(!stderr_indicates_missing_image(""));
+    }
 }

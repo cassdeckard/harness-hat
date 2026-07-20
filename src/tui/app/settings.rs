@@ -297,9 +297,6 @@ impl App {
                 self.active_settings_workspace = None;
             }
             SidebarItem::Launch(pi) => {
-                if pi >= cfg.workspaces.len() {
-                    return;
-                }
                 if !self.open_template_picker_for_workspace(pi) {
                     return;
                 }
